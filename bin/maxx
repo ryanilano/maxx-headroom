@@ -71,6 +71,8 @@ with_timeout() {
 
 # install_file <dest> [mode] — content on stdin; writes only when content
 # differs, so repeat runs make zero changes. Sets LAST_WRITE=updated|unchanged.
+# Feed stdin by redirection (<<<"$content"), never as a pipeline stage: a
+# pipeline runs this in a subshell and the LAST_WRITE/CHANGES updates are lost.
 install_file() {
   local dest="$1" mode="${2:-}" tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/maxx.XXXXXX")"
@@ -203,6 +205,7 @@ step_bindir() {
 }
 
 step_profiles_file() {
+  local content
   if [ -f "$PROFILES_FILE" ]; then
     if jq -e '.profiles | type == "array" and length > 0' "$PROFILES_FILE" >/dev/null 2>&1; then
       ok "profiles file present, left untouched: $PROFILES_FILE"
@@ -210,7 +213,8 @@ step_profiles_file() {
       die "profiles file exists but is not valid: $PROFILES_FILE — fix it and re-run"
     fi
   else
-    printf '%s\n' "$DEFAULT_PROFILES" | jq '.' | install_file "$PROFILES_FILE"
+    content="$(printf '%s\n' "$DEFAULT_PROFILES" | jq '.')"
+    install_file "$PROFILES_FILE" <<<"$content"
     ok "installed default profiles (main, alt): $PROFILES_FILE"
   fi
 }
@@ -230,9 +234,10 @@ step_config_dirs() {
 }
 
 step_wrappers() {
-  local name cfg wrapper tool
+  local name cfg wrapper tool body
   while IFS=$'\t' read -r name cfg wrapper tool; do
-    wrapper_body "$cfg" "$tool" | install_file "$BIN_DIR/$wrapper" 755
+    body="$(wrapper_body "$cfg" "$tool")"
+    install_file "$BIN_DIR/$wrapper" 755 <<<"$body"
     ok "[$name] $BIN_DIR/$wrapper ($LAST_WRITE)"
   done < <(profile_rows)
 }
@@ -260,7 +265,7 @@ step_pilotfish() {
       warn "[$canon] availableModels allowlist is missing:$gaps — role agents will silently inherit the main-session model"
     fi
   fi
-  local name cfg wrapper tool path link cur
+  local name cfg wrapper tool path link cur merged
   while IFS=$'\t' read -r name cfg wrapper tool; do
     if [ "$name" = "$canon" ]; then continue; fi
     path="$(expand_cfg "$cfg")"
@@ -299,14 +304,15 @@ step_pilotfish() {
     if [ "$sync_keys" != "{}" ]; then
       cur="{}"
       if [ -f "$path/settings.json" ]; then cur="$(cat "$path/settings.json")"; fi
-      printf '%s\n' "$cur" | jq --argjson d "$sync_keys" '. * $d' | install_file "$path/settings.json"
+      merged="$(printf '%s\n' "$cur" | jq --argjson d "$sync_keys" '. * $d')"
+      install_file "$path/settings.json" <<<"$merged"
       ok "[$name] settings model keys replicated ($LAST_WRITE)"
     fi
   done < <(profile_rows)
 }
 
 step_ccmanager() {
-  local desired existing
+  local desired existing merged
   desired="$(profile_rows | while IFS=$'\t' read -r name cfg wrapper tool; do
     jq -n --arg id "$name" --arg cmd "$BIN_DIR/$wrapper" \
       '{ id: $id, name: $id, command: $cmd, args: ["--teammate-mode", "in-process"], fallbackArgs: [] }'
@@ -319,7 +325,7 @@ step_ccmanager() {
   # Merge, never clobber: unmanaged presets and unknown keys survive; presets
   # matching a profile name converge on the managed definition; the default
   # preset and start behavior are only set when absent.
-  printf '%s\n' "$existing" | jq --argjson desired "$desired" '
+  merged="$(printf '%s\n' "$existing" | jq --argjson desired "$desired" '
     .commandPresets = (
       (.commandPresets // {}) as $cp
       | ($cp.presets // []) as $have
@@ -332,7 +338,8 @@ step_ccmanager() {
           selectPresetOnStart: (if $cp | has("selectPresetOnStart") then $cp.selectPresetOnStart else true end)
         }
     )
-  ' | install_file "$CCMANAGER_CONFIG"
+  ')"
+  install_file "$CCMANAGER_CONFIG" <<<"$merged"
   ok "ccmanager presets merged into $CCMANAGER_CONFIG ($LAST_WRITE)"
   if ! command -v ccmanager >/dev/null 2>&1; then
     note "ccmanager itself is not installed; when ready: npm install -g ccmanager"
@@ -593,10 +600,11 @@ cmd_pin() {
     settings="$(jq '.' "$vsfile" 2>/dev/null)" \
       || die "$vsfile is not parseable JSON (JSONC comments or trailing commas?) — add CLAUDE_CONFIG_DIR to terminal.integrated.env.osx/.linux by hand"
   fi
-  printf '%s\n' "$settings" | jq --arg v "$val" '
+  settings="$(printf '%s\n' "$settings" | jq --arg v "$val" '
       ."terminal.integrated.env.osx"   = ((."terminal.integrated.env.osx"   // {}) + { CLAUDE_CONFIG_DIR: $v })
     | ."terminal.integrated.env.linux" = ((."terminal.integrated.env.linux" // {}) + { CLAUDE_CONFIG_DIR: $v })
-  ' | install_file "$vsfile"
+  ')"
+  install_file "$vsfile" <<<"$settings"
   ok "pinned $repo to profile '$profile' ($LAST_WRITE): VS Code terminals get CLAUDE_CONFIG_DIR=$val"
   note "existing keys in $vsfile were preserved"
 }
