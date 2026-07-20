@@ -16,7 +16,17 @@ It has a companion: pilotfish decides which model does the work; maxx-headroom d
 
 ## Install
 
-Requires `jq`, and Claude Code itself. macOS and Linux.
+Works on macOS and Linux. The stock macOS bash (3.2) is enough, so there is nothing to install beyond the list below.
+
+Required:
+
+- `jq` (`brew install jq` or `apt install jq`). Every command except `help` stops without it.
+- Claude Code, with `claude` on your PATH. The wrappers run it, and the auth checks start a trial session with it. `setup` and `pin` work without it, but `doctor` reports it as a failure.
+
+Optional:
+
+- ccmanager (`npm install -g ccmanager`, which needs node). `setup` writes its presets whether or not it is installed.
+- VS Code, only for `maxx pin`, which writes the repo's `.vscode/settings.json`.
 
 ```sh
 git clone https://github.com/ryanilano/maxx-headroom.git
