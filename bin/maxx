@@ -1,0 +1,650 @@
+#!/usr/bin/env bash
+# maxx — set up, verify, and repo-pin multi-account Claude Code usage.
+# Part of maxx-headroom: https://github.com/ryanilano/maxx-headroom
+#
+# Bash 3.2 compatible (macOS system bash). Requires jq.
+
+set -euo pipefail
+
+MAXX_CONFIG_DIR="${MAXX_CONFIG_DIR:-$HOME/.config/maxx}"
+PROFILES_FILE="$MAXX_CONFIG_DIR/profiles.json"
+CCMANAGER_CONFIG="$HOME/.config/ccmanager/config.json"
+BIN_DIR="$HOME/bin"
+AUTH_TIMEOUT="${MAXX_AUTH_TIMEOUT:-90}"
+
+# Profiles are data, not structure: add or retire a profile by editing
+# profiles.json — no code change. config_dir is relative to $HOME (or
+# absolute). `tool` is reserved for future non-Claude agents; it is the
+# binary the wrapper execs and the binary used for the auth trial session.
+DEFAULT_PROFILES='{
+  "canonical": "main",
+  "profiles": [
+    { "name": "main", "config_dir": ".claude-main", "wrapper": "claude-main", "tool": "claude" },
+    { "name": "fyi",  "config_dir": ".claude-fyi",  "wrapper": "claude-fyi",  "tool": "claude" }
+  ]
+}'
+
+ASSUME_YES=0
+NO_AUTH=0
+FAILS=0
+WARNS=0
+CHANGES=0
+LAST_WRITE=""
+
+if [ -t 1 ]; then
+  C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_OFF=$'\033[0m'
+else
+  C_OK=""; C_WARN=""; C_ERR=""; C_OFF=""
+fi
+
+ok()   { printf '  %sok%s   %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { WARNS=$((WARNS+1)); printf '  %swarn%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
+err()  { FAILS=$((FAILS+1)); printf '  %sFAIL%s %s\n' "$C_ERR" "$C_OFF" "$*"; }
+note() { printf '       %s\n' "$*"; }
+die()  { printf '%serror%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+require_jq() {
+  command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq / apt install jq)"
+}
+
+confirm() {
+  if [ "$ASSUME_YES" = 1 ]; then return 0; fi
+  local ans
+  printf '%s [y/N] ' "$1"
+  read -r ans || return 1
+  case "$ans" in
+    y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Portable timeout: bash 3.2 has no `timeout`, macOS ships no coreutils.
+# alarm(2) survives exec, so the child dies on SIGALRM after $1 seconds.
+with_timeout() {
+  local secs="$1"; shift
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift @ARGV; exec @ARGV' "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# install_file <dest> [mode] — content on stdin; writes only when content
+# differs, so repeat runs make zero changes. Sets LAST_WRITE=updated|unchanged.
+install_file() {
+  local dest="$1" mode="${2:-}" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/maxx.XXXXXX")"
+  cat >"$tmp"
+  if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+    rm -f "$tmp"
+    LAST_WRITE="unchanged"
+  else
+    mkdir -p "$(dirname "$dest")"
+    mv "$tmp" "$dest"
+    LAST_WRITE="updated"
+    CHANGES=$((CHANGES+1))
+  fi
+  if [ -n "$mode" ] && [ ! -x "$dest" ]; then
+    chmod "$mode" "$dest"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# profile data
+
+profiles_json() {
+  if [ -f "$PROFILES_FILE" ] && jq -e '.profiles | type == "array" and length > 0' "$PROFILES_FILE" >/dev/null 2>&1; then
+    cat "$PROFILES_FILE"
+  else
+    printf '%s\n' "$DEFAULT_PROFILES"
+  fi
+}
+
+# One profile per line: name<TAB>config_dir<TAB>wrapper<TAB>tool
+profile_rows() {
+  profiles_json | jq -r '.profiles[] | [.name, .config_dir, (.wrapper // ("claude-" + .name)), (.tool // "claude")] | @tsv'
+}
+
+canonical_name() {
+  profiles_json | jq -r '.canonical // "main"'
+}
+
+profile_config_dir() {
+  profiles_json | jq -r --arg n "$1" '[.profiles[] | select(.name == $n) | .config_dir] | first // empty'
+}
+
+expand_cfg() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)  printf '%s\n' "$HOME/$1" ;;
+  esac
+}
+
+wrapper_body() {
+  # $1 config_dir, $2 tool
+  local cfg="$1" tool="$2" line
+  case "$cfg" in
+    /*) line="CLAUDE_CONFIG_DIR=\"$cfg\"" ;;
+    *)  line="CLAUDE_CONFIG_DIR=\"\$HOME/$cfg\"" ;;
+  esac
+  # shellcheck disable=SC2016 # $HOME and "$@" must reach the wrapper unexpanded
+  printf '#!/bin/sh\n# Managed by maxx (maxx-headroom); `maxx setup` regenerates this file.\n%s\nexport CLAUDE_CONFIG_DIR\nexec %s "$@"\n' "$line" "$tool"
+}
+
+# Lazy auth verification: launch a real trial session with CLAUDE_CONFIG_DIR
+# set and branch on the exit status. Never probes Keychain or credential files.
+auth_trial() {
+  # $1 tool, $2 expanded config dir
+  CLAUDE_CONFIG_DIR="$2" with_timeout "$AUTH_TIMEOUT" "$1" -p "Reply with the single word OK." </dev/null >/dev/null 2>&1
+}
+
+# Model keys that pilotfish sync replicates from the canonical profile.
+sync_key_sig() {
+  jq -S -c '{model, fallbackModel, availableModels} | with_entries(select(.value != null))' "$1" 2>/dev/null || printf '{}'
+}
+
+# Prints the model families missing from an availableModels allowlist
+# (empty output when there is no allowlist, or nothing is missing).
+allowlist_gaps() {
+  local f="$1" fam gaps=""
+  jq -e '.availableModels | type == "array"' "$f" >/dev/null 2>&1 || return 0
+  for fam in opus sonnet haiku; do
+    if ! jq -e --arg fam "$fam" '.availableModels | map(tostring | contains($fam)) | any' "$f" >/dev/null 2>&1; then
+      gaps="$gaps $fam"
+    fi
+  done
+  printf '%s' "$gaps"
+}
+
+parse_common_flags() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y)  ASSUME_YES=1 ;;
+      --no-auth) NO_AUTH=1 ;;
+      *) die "unknown flag: $1 (see: maxx help)" ;;
+    esac
+    shift
+  done
+}
+
+# ---------------------------------------------------------------------------
+# setup
+
+setup_preflight() {
+  printf '== preflight (read-only) ==\n'
+  local t
+  for t in claude node ccmanager; do
+    if command -v "$t" >/dev/null 2>&1; then
+      ok "$t: $(command -v "$t")"
+    else
+      case "$t" in
+        claude)    warn "claude not on PATH — install Claude Code first; auth checks will be skipped" ;;
+        node)      warn "node not on PATH — needed to install ccmanager (npm install -g ccmanager)" ;;
+        ccmanager) warn "ccmanager not on PATH — presets will be written anyway; install with: npm install -g ccmanager" ;;
+      esac
+    fi
+  done
+}
+
+step_bindir() {
+  if [ -d "$BIN_DIR" ]; then
+    ok "$BIN_DIR exists"
+  else
+    mkdir -p "$BIN_DIR"
+    CHANGES=$((CHANGES+1))
+    ok "created $BIN_DIR"
+  fi
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ok "PATH includes $BIN_DIR" ;;
+    *) warn "$BIN_DIR is not on PATH — add this to your shell profile:"
+       # shellcheck disable=SC2016 # shown literally for the user to paste
+       note 'export PATH="$HOME/bin:$PATH"' ;;
+  esac
+}
+
+step_profiles_file() {
+  if [ -f "$PROFILES_FILE" ]; then
+    if jq -e '.profiles | type == "array" and length > 0' "$PROFILES_FILE" >/dev/null 2>&1; then
+      ok "profiles file present, left untouched: $PROFILES_FILE"
+    else
+      die "profiles file exists but is not valid: $PROFILES_FILE — fix it and re-run"
+    fi
+  else
+    printf '%s\n' "$DEFAULT_PROFILES" | jq '.' | install_file "$PROFILES_FILE"
+    ok "installed default profiles (main, fyi): $PROFILES_FILE"
+  fi
+}
+
+step_config_dirs() {
+  local name cfg wrapper tool path
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    path="$(expand_cfg "$cfg")"
+    if [ -d "$path" ]; then
+      ok "[$name] $path exists"
+    else
+      mkdir -p "$path"
+      CHANGES=$((CHANGES+1))
+      ok "[$name] created $path"
+    fi
+  done < <(profile_rows)
+}
+
+step_wrappers() {
+  local name cfg wrapper tool
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    wrapper_body "$cfg" "$tool" | install_file "$BIN_DIR/$wrapper" 755
+    ok "[$name] $BIN_DIR/$wrapper ($LAST_WRITE)"
+  done < <(profile_rows)
+}
+
+step_pilotfish() {
+  local canon canon_cfg canon_path canon_agents canon_settings sync_keys gaps
+  canon="$(canonical_name)"
+  canon_cfg="$(profile_config_dir "$canon")"
+  if [ -z "$canon_cfg" ]; then
+    warn "canonical profile '$canon' not found in profiles — skipping pilotfish sync"
+    return 0
+  fi
+  canon_path="$(expand_cfg "$canon_cfg")"
+  canon_agents="$canon_path/agents"
+  canon_settings="$canon_path/settings.json"
+  if [ ! -d "$canon_agents" ] && [ ! -f "$canon_settings" ]; then
+    warn "[$canon] no agents/ or settings.json in $canon_path — pilotfish not installed yet? See RUNBOOK.md"
+    return 0
+  fi
+  sync_keys="{}"
+  if [ -f "$canon_settings" ]; then
+    sync_keys="$(sync_key_sig "$canon_settings")"
+    gaps="$(allowlist_gaps "$canon_settings")"
+    if [ -n "$gaps" ]; then
+      warn "[$canon] availableModels allowlist is missing:$gaps — role agents will silently inherit the main-session model"
+    fi
+  fi
+  local name cfg wrapper tool path link cur
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    if [ "$name" = "$canon" ]; then continue; fi
+    path="$(expand_cfg "$cfg")"
+    if [ ! -d "$path" ]; then
+      warn "[$name] $path missing — run the config-dir step first"
+      continue
+    fi
+    link="$path/agents"
+    if [ -d "$canon_agents" ]; then
+      if [ -L "$link" ]; then
+        if [ "$(readlink "$link")" = "$canon_agents" ]; then
+          ok "[$name] agents/ already linked to canonical"
+        else
+          rm "$link"
+          ln -s "$canon_agents" "$link"
+          CHANGES=$((CHANGES+1))
+          ok "[$name] agents/ symlink repointed to $canon_agents"
+        fi
+      elif [ -d "$link" ]; then
+        if [ -z "$(ls -A "$link")" ]; then
+          rmdir "$link"
+          ln -s "$canon_agents" "$link"
+          CHANGES=$((CHANGES+1))
+          ok "[$name] empty agents/ dir replaced with symlink (a Claude Code update likely recreated it)"
+        else
+          warn "[$name] $link is a real, non-empty directory — a Claude Code update probably recreated it; see RUNBOOK.md before merging or deleting"
+        fi
+      elif [ -e "$link" ]; then
+        warn "[$name] $link exists but is neither a directory nor a symlink — resolve manually"
+      else
+        ln -s "$canon_agents" "$link"
+        CHANGES=$((CHANGES+1))
+        ok "[$name] agents/ -> $canon_agents"
+      fi
+    fi
+    if [ "$sync_keys" != "{}" ]; then
+      cur="{}"
+      if [ -f "$path/settings.json" ]; then cur="$(cat "$path/settings.json")"; fi
+      printf '%s\n' "$cur" | jq --argjson d "$sync_keys" '. * $d' | install_file "$path/settings.json"
+      ok "[$name] settings model keys replicated ($LAST_WRITE)"
+    fi
+  done < <(profile_rows)
+}
+
+step_ccmanager() {
+  local desired existing
+  desired="$(profile_rows | while IFS=$'\t' read -r name cfg wrapper tool; do
+    jq -n --arg id "$name" --arg cmd "$BIN_DIR/$wrapper" \
+      '{ id: $id, name: $id, command: $cmd, args: ["--teammate-mode", "in-process"], fallbackArgs: [] }'
+  done | jq -s '.')"
+  existing='{}'
+  if [ -f "$CCMANAGER_CONFIG" ]; then
+    existing="$(jq '.' "$CCMANAGER_CONFIG" 2>/dev/null)" \
+      || die "$CCMANAGER_CONFIG is not valid JSON — fix or remove it, then re-run"
+  fi
+  # Merge, never clobber: unmanaged presets and unknown keys survive; presets
+  # matching a profile name converge on the managed definition; the default
+  # preset and start behavior are only set when absent.
+  printf '%s\n' "$existing" | jq --argjson desired "$desired" '
+    .commandPresets = (
+      (.commandPresets // {}) as $cp
+      | ($cp.presets // []) as $have
+      | $cp
+      + { presets: (
+            [ $have[] | select(.id as $i | ($desired | map(.id) | index($i)) == null) ]
+            + [ $desired[] as $d | (([ $have[] | select(.id == $d.id) ] | first // {}) + $d) ]
+          ),
+          defaultPresetId: ($cp.defaultPresetId // "main"),
+          selectPresetOnStart: (if $cp | has("selectPresetOnStart") then $cp.selectPresetOnStart else true end)
+        }
+    )
+  ' | install_file "$CCMANAGER_CONFIG"
+  ok "ccmanager presets merged into $CCMANAGER_CONFIG ($LAST_WRITE)"
+  if ! command -v ccmanager >/dev/null 2>&1; then
+    note "ccmanager itself is not installed; when ready: npm install -g ccmanager"
+  fi
+}
+
+step_auth() {
+  if [ "$NO_AUTH" = 1 ]; then
+    note "auth checks skipped (--no-auth)"
+    return 0
+  fi
+  local name cfg wrapper tool path
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    path="$(expand_cfg "$cfg")"
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      warn "[$name] '$tool' not on PATH — cannot run auth trial"
+      continue
+    fi
+    if [ ! -d "$path" ]; then
+      warn "[$name] $path missing — run the config-dir step first"
+      continue
+    fi
+    note "[$name] launching trial session (up to ${AUTH_TIMEOUT}s)..."
+    if auth_trial "$tool" "$path"; then
+      ok "[$name] authenticated"
+    else
+      warn "[$name] not authenticated — run: $wrapper   then /login inside it"
+    fi
+  done < <(profile_rows)
+}
+
+cmd_setup() {
+  parse_common_flags "$@"
+  require_jq
+  printf 'maxx setup — each step asks before touching anything.\n\n'
+  setup_preflight
+
+  printf '\n== 1. %s ==\n' "$BIN_DIR"
+  if confirm "Ensure $BIN_DIR exists (and check PATH)?"; then step_bindir; else note "skipped"; fi
+
+  printf '\n== 2. profiles ==\n'
+  if confirm "Install default profiles file if missing ($PROFILES_FILE)?"; then step_profiles_file; else note "skipped"; fi
+
+  printf '\n== 3. config dirs ==\n'
+  if confirm "Create per-profile config dirs?"; then step_config_dirs; else note "skipped"; fi
+
+  printf '\n== 4. wrappers ==\n'
+  if confirm "Write per-profile wrapper scripts into $BIN_DIR?"; then step_wrappers; else note "skipped"; fi
+
+  printf '\n== 5. pilotfish sync ==\n'
+  if confirm "Sync agents/ symlinks and model settings from the canonical profile?"; then step_pilotfish; else note "skipped"; fi
+
+  printf '\n== 6. ccmanager ==\n'
+  if confirm "Merge per-profile presets into $CCMANAGER_CONFIG?"; then step_ccmanager; else note "skipped"; fi
+
+  printf '\n== 7. auth ==\n'
+  if confirm "Check per-profile auth (launches one trial session per profile)?"; then step_auth; else note "skipped"; fi
+
+  if [ "$CHANGES" -eq 0 ]; then
+    printf '\nDone. No changes — everything was already in place.\n'
+  else
+    printf '\nDone. %d change(s) applied. Run: maxx doctor\n' "$CHANGES"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# doctor
+
+cmd_doctor() {
+  parse_common_flags "$@"
+  printf 'maxx doctor\n'
+
+  printf '\n== host ==\n'
+  if ! command -v jq >/dev/null 2>&1; then
+    err "jq not found — maxx needs jq for everything (brew install jq / apt install jq)"
+    printf '\n1 problem. Cannot check further without jq.\n'
+    exit 1
+  fi
+  ok "jq: $(command -v jq)"
+  local t
+  while IFS= read -r t; do
+    if command -v "$t" >/dev/null 2>&1; then
+      ok "$t: $(command -v "$t")"
+    else
+      err "'$t' not on PATH — profiles that use it cannot run"
+    fi
+  done < <(profiles_json | jq -r '[.profiles[] | .tool // "claude"] | unique | .[]')
+  if command -v node >/dev/null 2>&1; then
+    ok "node: $(command -v node)"
+  else
+    warn "node not on PATH — needed to install ccmanager (npm install -g ccmanager)"
+  fi
+  if command -v ccmanager >/dev/null 2>&1; then
+    ok "ccmanager: $(command -v ccmanager)"
+  else
+    warn "ccmanager not on PATH — install with: npm install -g ccmanager"
+  fi
+  if [ -d "$BIN_DIR" ]; then
+    ok "$BIN_DIR exists"
+  else
+    err "$BIN_DIR does not exist (run: maxx setup)"
+  fi
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ok "PATH includes $BIN_DIR" ;;
+    *) err "$BIN_DIR is not on PATH — wrappers and ccmanager presets depend on it" ;;
+  esac
+
+  printf '\n== profiles ==\n'
+  if [ -f "$PROFILES_FILE" ]; then
+    if jq -e '.profiles | type == "array" and length > 0' "$PROFILES_FILE" >/dev/null 2>&1; then
+      ok "profiles file: $PROFILES_FILE"
+    else
+      err "profiles file invalid: $PROFILES_FILE — checking shipped defaults below"
+    fi
+  else
+    err "profiles file missing: $PROFILES_FILE (run: maxx setup) — checking shipped defaults below"
+  fi
+
+  local ccmanager_conf_ok=0
+  if [ -f "$CCMANAGER_CONFIG" ] && jq -e '.' "$CCMANAGER_CONFIG" >/dev/null 2>&1; then
+    ccmanager_conf_ok=1
+  else
+    err "ccmanager config missing or invalid: $CCMANAGER_CONFIG (run: maxx setup)"
+  fi
+
+  local canon canon_cfg canon_path canon_agents canon_settings canon_sig
+  canon="$(canonical_name)"
+  canon_cfg="$(profile_config_dir "$canon")"
+  canon_path=""; canon_agents=""; canon_settings=""; canon_sig="{}"
+  if [ -n "$canon_cfg" ]; then
+    canon_path="$(expand_cfg "$canon_cfg")"
+    canon_agents="$canon_path/agents"
+    canon_settings="$canon_path/settings.json"
+    if [ -f "$canon_settings" ]; then
+      canon_sig="$(sync_key_sig "$canon_settings")"
+    fi
+    if [ ! -d "$canon_agents" ]; then
+      warn "[$canon] no agents/ in $canon_path — pilotfish not installed? See RUNBOOK.md"
+    fi
+  else
+    err "canonical profile '$canon' not found in profiles"
+  fi
+
+  local name cfg wrapper tool path link target sfile gaps sig
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    printf '\n== profile: %s ==\n' "$name"
+    path="$(expand_cfg "$cfg")"
+
+    if [ -d "$path" ]; then
+      ok "config dir: $path"
+    else
+      err "config dir missing: $path (run: maxx setup)"
+    fi
+
+    if [ -x "$BIN_DIR/$wrapper" ]; then
+      if wrapper_body "$cfg" "$tool" | cmp -s - "$BIN_DIR/$wrapper"; then
+        ok "wrapper: $BIN_DIR/$wrapper"
+      else
+        warn "wrapper $BIN_DIR/$wrapper differs from the managed template — customized? (maxx setup regenerates it)"
+      fi
+    else
+      err "wrapper missing or not executable: $BIN_DIR/$wrapper (run: maxx setup)"
+    fi
+
+    if [ "$ccmanager_conf_ok" = 1 ]; then
+      if jq -e --arg id "$name" --arg cmd "$BIN_DIR/$wrapper" \
+           '(.commandPresets.presets // []) | any(.id == $id and .command == $cmd)' \
+           "$CCMANAGER_CONFIG" >/dev/null 2>&1; then
+        ok "ccmanager preset '$name' present"
+      else
+        err "ccmanager preset '$name' missing (run: maxx setup)"
+      fi
+    fi
+
+    if [ "$name" != "$canon" ] && [ -n "$canon_agents" ] && [ -d "$canon_agents" ] && [ -d "$path" ]; then
+      link="$path/agents"
+      if [ -L "$link" ]; then
+        target="$(readlink "$link")"
+        if [ "$target" = "$canon_agents" ] && [ -e "$link" ]; then
+          ok "agents/ symlink -> canonical"
+        elif [ ! -e "$link" ]; then
+          err "agents/ symlink is broken (points to $target) — run: maxx setup"
+        else
+          err "agents/ symlink points to $target, not $canon_agents — run: maxx setup"
+        fi
+      elif [ -d "$link" ]; then
+        err "agents/ is a real directory, not a symlink — a Claude Code update probably recreated it; see RUNBOOK.md"
+      else
+        err "agents/ missing — run: maxx setup"
+      fi
+    fi
+
+    if [ -d "$path" ]; then
+      sfile="$path/settings.json"
+      if [ -f "$sfile" ]; then
+        gaps="$(allowlist_gaps "$sfile")"
+        if [ -n "$gaps" ]; then
+          err "availableModels allowlist missing:$gaps — role agents will silently inherit the main-session model"
+        else
+          ok "availableModels allowlist ok (or no allowlist set)"
+        fi
+        if [ "$name" != "$canon" ] && [ "$canon_sig" != "{}" ]; then
+          sig="$(sync_key_sig "$sfile")"
+          if [ "$sig" = "$canon_sig" ]; then
+            ok "model settings match canonical"
+          else
+            warn "model settings drift from canonical — run: maxx setup (pilotfish sync step)"
+          fi
+        fi
+      elif [ "$canon_sig" != "{}" ]; then
+        warn "no settings.json — model settings not replicated from canonical (run: maxx setup)"
+      fi
+    fi
+
+    if [ "$NO_AUTH" = 1 ]; then
+      note "auth check skipped (--no-auth)"
+    elif command -v "$tool" >/dev/null 2>&1 && [ -d "$path" ]; then
+      note "launching trial session (up to ${AUTH_TIMEOUT}s)..."
+      if auth_trial "$tool" "$path"; then
+        ok "authenticated"
+      else
+        err "not authenticated — run: $wrapper   then /login inside it"
+      fi
+    else
+      note "auth check skipped (prerequisites missing above)"
+    fi
+  done < <(profile_rows)
+
+  printf '\n%d problem(s), %d warning(s).\n' "$FAILS" "$WARNS"
+  if [ "$FAILS" -gt 0 ]; then
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# pin
+
+cmd_pin() {
+  local repo="${1:-}" profile="${2:-}"
+  if [ -z "$repo" ] || [ -z "$profile" ]; then
+    die "usage: maxx pin <repo-path> <profile>"
+  fi
+  require_jq
+  [ -d "$repo" ] || die "no such directory: $repo"
+  local cfg
+  cfg="$(profile_config_dir "$profile")"
+  [ -n "$cfg" ] || die "unknown profile: $profile (see: maxx profiles)"
+  local val
+  # shellcheck disable=SC2016 # ${env:HOME} is VS Code syntax, expanded by VS Code
+  case "$cfg" in
+    /*) val="$cfg" ;;
+    *)  val='${env:HOME}/'"$cfg" ;;
+  esac
+  local vsfile settings
+  vsfile="$repo/.vscode/settings.json"
+  settings='{}'
+  if [ -f "$vsfile" ]; then
+    settings="$(jq '.' "$vsfile" 2>/dev/null)" \
+      || die "$vsfile is not parseable JSON (JSONC comments or trailing commas?) — add CLAUDE_CONFIG_DIR to terminal.integrated.env.osx/.linux by hand"
+  fi
+  printf '%s\n' "$settings" | jq --arg v "$val" '
+      ."terminal.integrated.env.osx"   = ((."terminal.integrated.env.osx"   // {}) + { CLAUDE_CONFIG_DIR: $v })
+    | ."terminal.integrated.env.linux" = ((."terminal.integrated.env.linux" // {}) + { CLAUDE_CONFIG_DIR: $v })
+  ' | install_file "$vsfile"
+  ok "pinned $repo to profile '$profile' ($LAST_WRITE): VS Code terminals get CLAUDE_CONFIG_DIR=$val"
+  note "existing keys in $vsfile were preserved"
+}
+
+# ---------------------------------------------------------------------------
+# profiles / help
+
+cmd_profiles() {
+  require_jq
+  if [ -f "$PROFILES_FILE" ]; then
+    printf 'profiles (%s)\n' "$PROFILES_FILE"
+  else
+    printf 'profiles (shipped defaults — no profiles file yet; run: maxx setup)\n'
+  fi
+  printf '%-10s %-28s %-28s %s\n' NAME CONFIG_DIR WRAPPER TOOL
+  local name cfg wrapper tool
+  while IFS=$'\t' read -r name cfg wrapper tool; do
+    printf '%-10s %-28s %-28s %s\n' "$name" "$(expand_cfg "$cfg")" "$BIN_DIR/$wrapper" "$tool"
+  done < <(profile_rows)
+}
+
+usage() {
+  cat <<'EOF'
+maxx — multi-account Claude Code: set up, verify, repo-pin.
+
+usage:
+  maxx setup [--yes] [--no-auth]    interactive machine setup, per-step confirm
+  maxx doctor [--no-auth]           verify everything; exits nonzero if broken
+  maxx pin <repo-path> <profile>    pin a repo's VS Code terminals to a profile
+  maxx profiles                     list configured profiles
+  maxx help                         this text
+
+profiles are data: edit ~/.config/maxx/profiles.json to add or retire one.
+judgment-heavy migrations (pilotfish install, CLAUDE.md merges) live in RUNBOOK.md.
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  if [ $# -gt 0 ]; then shift; fi
+  case "$cmd" in
+    setup)        cmd_setup "$@" ;;
+    doctor)       cmd_doctor "$@" ;;
+    pin)          cmd_pin "$@" ;;
+    profiles)     cmd_profiles ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"
