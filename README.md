@@ -6,7 +6,7 @@ I had one $20 Claude account, and I was used to maxing it out. Then Fable 5 land
 
 So now there are two tanks of quota, and the only unacceptable outcome is either one sitting full while the model is still around. maxx-headroom is the tool that makes sure that never happens: it sets up, verifies, and repo-pins multi-account Claude Code usage, so switching accounts is a solved problem instead of a nightly ritual.
 
-Profiles are data, not structure. Today that means two Claude accounts (`main` and `fyi`); tomorrow it might be one account again, or a GPT or Kimi subscription sitting alongside. Add or retire a profile by editing one JSON entry — the tool doesn't care.
+Profiles are data, not structure. Today that means two Claude accounts — `main` and a secondary account we'll refer to as `alt`; tomorrow it might be one account again, or a GPT or Kimi subscription sitting alongside. Add or retire a profile by editing one JSON entry — the tool doesn't care.
 
 ## Why the name
 
@@ -42,6 +42,8 @@ maxx pin <repo> <profile> # pin a repo's VS Code terminals to one account
 `pin` writes `CLAUDE_CONFIG_DIR` into a repo's `.vscode/settings.json` terminal environment, so every terminal you open in that repo bills the account you chose. Existing settings are preserved.
 
 Profiles live in `~/.config/maxx/profiles.json`. The judgment-heavy stuff — installing pilotfish on a fresh machine, merging its CLAUDE.md block into a customized one, rescuing a symlink an update destroyed — is written up in [RUNBOOK.md](RUNBOOK.md) for a Claude Code session to execute.
+
+Side note: maxx-headroom deliberately stays out of model routing. pilotfish, GSD, Superpowers — every agent pack manages its model choices through its own configuration, on its own turf. maxx-headroom just symlinks the canonical `agents/` directory across profiles, so whatever routing lives there travels to every account on its own.
 
 ## License
 

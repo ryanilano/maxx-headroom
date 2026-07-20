@@ -20,7 +20,7 @@ DEFAULT_PROFILES='{
   "canonical": "main",
   "profiles": [
     { "name": "main", "config_dir": ".claude-main", "wrapper": "claude-main", "tool": "claude" },
-    { "name": "fyi",  "config_dir": ".claude-fyi",  "wrapper": "claude-fyi",  "tool": "claude" }
+    { "name": "alt",  "config_dir": ".claude-alt",  "wrapper": "claude-alt",  "tool": "claude" }
   ]
 }'
 
@@ -211,7 +211,7 @@ step_profiles_file() {
     fi
   else
     printf '%s\n' "$DEFAULT_PROFILES" | jq '.' | install_file "$PROFILES_FILE"
-    ok "installed default profiles (main, fyi): $PROFILES_FILE"
+    ok "installed default profiles (main, alt): $PROFILES_FILE"
   fi
 }
 

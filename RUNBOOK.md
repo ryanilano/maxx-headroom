@@ -48,7 +48,9 @@ is the procedure.
 
 pilotfish ships a marker-delimited block for the user-level `CLAUDE.md`. On a
 machine where `CLAUDE.md` has been customized, blind replacement would destroy
-local edits — which is why the script never touches it.
+local edits — which is why the script never touches it. Note that the
+customization may live *outside* the markers too; everything outside the
+markers must survive the merge untouched.
 
 1. Locate both files: the block pilotfish ships (in its repo or install
    output) and the target `CLAUDE.md` in the canonical config dir.
@@ -75,7 +77,7 @@ with a real directory. `maxx doctor` reports it as
 automatically only when the recreated directory is empty. If it has content:
 
 1. Compare the recreated directory against the canonical one:
-   `diff -r ~/.claude-fyi/agents ~/.claude-main/agents` (adjust paths).
+   `diff -r ~/.claude-alt/agents ~/.claude-main/agents` (adjust paths).
 2. Files identical to canonical → safe to discard with the directory.
 3. Files that exist **only** in the recreated directory, or differ → decide
    per file: if it's something the update generated, discard; if it's a real
@@ -84,8 +86,8 @@ automatically only when the recreated directory is empty. If it has content:
 4. Remove the recreated directory and restore the link:
 
    ```sh
-   rm -rf ~/.claude-fyi/agents
-   ln -s ~/.claude-main/agents ~/.claude-fyi/agents
+   rm -rf ~/.claude-alt/agents
+   ln -s ~/.claude-main/agents ~/.claude-alt/agents
    ```
 
    (or re-run `maxx setup`, which recreates the symlink once the path is
