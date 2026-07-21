@@ -66,7 +66,26 @@ On day one, cd into any repo and run `ccmanager`. It will show the worktree list
 > [!WARNING]
 > **The one thing that can break, and it's already covered.** Profiles share pilotfish through one symlink per profile that points at the canonical `agents/` directory. An installer or a Claude Code update that writes files into that directory is fine, and every profile sees the new files at once. A tool that instead deletes the directory and recreates it (`rm -rf agents/`, then a fresh directory) destroys the symlink, and the profiles silently disconnect. maxx is built for exactly that failure. `maxx doctor` detects it, and `maxx setup` or [RUNBOOK §3](RUNBOOK.md) repairs it. The only new habit maxx asks of you is to run `maxx doctor` after upgrading anything that touches `agents/`. It takes ten seconds and tells you whether a link got clobbered.
 
-Everything else in a profile is independent by design. Each config dir is a complete, separate Claude Code installation — skills, plugins, slash commands, and hooks in one profile do not exist in the others, and maxx only bridges `agents/`. If you want profiles to share more than that, you can symlink the other directories by hand (`skills/`, `plugins/`, `commands/`) and copy the `enabledPlugins` key into the profile's `settings.json` — the plugins directory alone activates nothing. But be clear about what you are signing up for: **`maxx doctor` checks only the `agents/` symlink.** A hand-made link destroyed by the same failure mode described above goes undetected, so if you create these links, checking them after any Claude Code update — and after the first login in a fresh profile, which scaffolds directory structure — is on you. Hooks are the exception that cannot be symlinked at all: they live inside each profile's `settings.json`, so they must be copied into every profile that wants them.
+Everything else in a profile is independent by design. Each config dir is a complete, separate Claude Code installation — skills, plugins, slash commands, and hooks in one profile do not exist in the others, and maxx only bridges `agents/`. If you want profiles to share more than that, you can symlink the other directories by hand (`skills/`, `plugins/`, `commands/`) and copy the `enabledPlugins` key into the profile's `settings.json` — the plugins directory alone activates nothing. But be clear about what you are signing up for: **`maxx doctor` checks the `agents/` symlink and nothing else by default.** A hand-made link destroyed by the same failure mode described above goes undetected — unless you register it. Add an optional `watch_links` map to `~/.config/maxx/profiles.json` and doctor guards those links too, with the same real-directory-instead-of-symlink detection as the managed `agents/` check:
+
+```json
+"watch_links": {
+  ".claude-main": ["skills", "plugins", "commands"]
+}
+```
+
+Keys are config dirs ($HOME-relative or absolute, same as `config_dir`), values are the link names inside them. maxx never creates these links — registering only means doctor refuses to let them break silently. Links you don't register remain on you, especially after any Claude Code update and after the first login in a fresh profile, which scaffolds directory structure. Hooks are the exception that cannot be symlinked at all: they live inside each profile's `settings.json`, so they must be copied into every profile that wants them.
+
+### Upgrading Claude Code
+
+The ritual is doctor, upgrade, doctor, one grep:
+
+1. `maxx doctor` — get a green baseline first, so anything the upgrade breaks is unambiguously the upgrade's doing.
+2. Upgrade (brew or however you installed it).
+3. `maxx doctor` — catches a clobbered `agents/` symlink. `maxx setup` auto-repairs it when the recreated directory is empty; [RUNBOOK §3](RUNBOOK.md) covers the merge when it has content.
+4. If you made the optional hand-made links described above (`skills/`, `plugins/`, `commands/`), register them in `watch_links` (see above) and step 3's doctor run covers them too. Anything unregistered you check yourself: `ls -la <config dir> | grep '\->'` should still show every arrow. If an update replaced any link with a real directory, the same diff-then-relink procedure from [RUNBOOK §3](RUNBOOK.md) applies — compare against the link target, salvage anything real, remove, relink.
+
+Upgrades don't rewrite `settings.json` or `CLAUDE.md`, so hooks and agent-pack config need no attention.
 
 Profiles live in `~/.config/maxx/profiles.json`. The judgment-heavy stuff — installing pilotfish on a fresh machine, merging its CLAUDE.md block into a customized one, rescuing a symlink an update destroyed — is written up in [RUNBOOK.md](RUNBOOK.md) for a Claude Code session to execute.
 

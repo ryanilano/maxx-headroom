@@ -568,6 +568,36 @@ cmd_doctor() {
     fi
   done < <(profile_rows)
 
+  # Watched links: optional top-level `watch_links` map in profiles.json —
+  # { "<dir>": ["skills", "plugins"], ... } with dirs $HOME-relative or
+  # absolute, same as config_dir. These are the hand-made symlinks the README
+  # describes (and any other link worth guarding, e.g. the default dir's
+  # agents/). maxx never creates them; doctor just refuses to let them break
+  # silently — the same update-recreates-a-real-directory failure mode as the
+  # managed agents/ link, with the same RUNBOOK §3 repair.
+  if profiles_json | jq -e '.watch_links | type == "object" and length > 0' >/dev/null 2>&1; then
+    printf '\n== watched links ==\n'
+    local wdir wname wpath wlink wtarget
+    while IFS=$'\t' read -r wdir wname; do
+      wpath="$(expand_cfg "$wdir")"
+      wlink="$wpath/$wname"
+      if [ -L "$wlink" ]; then
+        wtarget="$(readlink "$wlink")"
+        if [ -e "$wlink" ]; then
+          ok "$wdir/$wname -> $wtarget"
+        else
+          err "$wdir/$wname is a broken symlink (target $wtarget gone) — relink by hand; see RUNBOOK §3"
+        fi
+      elif [ -d "$wlink" ]; then
+        err "$wdir/$wname is a real directory, not a symlink — an update probably recreated it; see RUNBOOK §3"
+      elif [ -e "$wlink" ]; then
+        err "$wdir/$wname exists but is not a symlink — expected a link (watch_links in profiles.json)"
+      else
+        err "$wdir/$wname missing — relink by hand, or drop it from watch_links in profiles.json"
+      fi
+    done < <(profiles_json | jq -r '(.watch_links // {}) | to_entries[] | .key as $d | .value[] | [$d, .] | @tsv')
+  fi
+
   printf '\n%d problem(s), %d warning(s).\n' "$FAILS" "$WARNS"
   if [ "$FAILS" -gt 0 ]; then
     exit 1
