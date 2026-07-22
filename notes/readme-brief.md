@@ -22,4 +22,4 @@
 
 - Short, human, personal — reference register: richtabor.com READMEs
 - Self-aware about the $200/mo situation, not apologetic
-- Origin paragraph first, tool description second; no feature-matrix wall, no badges beyond license
+- The point first (what the tool does and why you'd run it), origin story second under its own heading; no feature-matrix wall, no badges beyond license
