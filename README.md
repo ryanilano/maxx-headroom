@@ -1,14 +1,12 @@
 # maxx-headroom
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
 [About](#origin-story) · [Install](#install) · [Usage](#usage) · [Further Reading](#further-reading)
 
-Do you have more than one Claude account? Don't let your weekly or 5-hour usage limits go to waste. Switch Claude Code between multiple paid accounts: each account gets its own profile, and maxx-headroom makes the setup, verification, and repo pinning painless.
-
-Switching accounts becomes a solved problem instead of a daily ritual.
+**Do you have more than one Claude account? Don't let your weekly or 5-hour usage limits go to waste.** Switch Claude Code between multiple accounts. Each account gets its own profile. maxx-headroom makes the setup, verification, and repo pinning painless. Switching accounts becomes a solved problem instead of a daily ritual.
 
 Today it's two Claude Max accounts. Next week it might be one Max account and one Pro account; next month maybe you throw in Kimi or DeepSeek. Profiles live in config, so adding or removing one is just an edit.
+
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Origin Story
 
@@ -16,9 +14,10 @@ I had one $20 Claude account, and I was used to maxing it out. Then Fable 5 land
 
 ## Why the Name
 
-Max Headroom was a fictional AI from 1985. Now it names a tool that keeps a real one fed. Headroom is literally the resource being managed here — which account has room left — and the double-x is the meme spelling (tokenmaxxing), which also keeps a polite distance from the trademark. I am aware that "tokenmaxxing" is a ridiculous phrase. Unfortunately, it is also accurate: I'm trying not to waste paid quota.
+Max Headroom was a fictional AI from 1985. Now it names a tool that keeps a real one fed. Headroom is literally the resource being managed here: Which account has Fable, 5-Hour, or weekly usage left to burn? This is all about tokenmaxxing (burning tokens and mogging inference providers) after three unexpected policy and billing changes. I am aware that "tokenmaxxing" is a ridiculous phrase. Unfortunately, it is also accurate: I'm trying not to waste paid quota.
 
-It has a companion: pilotfish decides which model does the work; maxx-headroom decides which account pays for it.
+maxx-headroom has a companion: 
+[pilotfish](https://github.com/Nanako0129/pilotfish) decides which model does the work, maxx-headroom helps you decide which account pays for it.
 
 ## Install
 
