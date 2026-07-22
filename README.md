@@ -6,7 +6,7 @@
 
 Do you have more than one Claude account? Don't let your weekly or 5-hour usage limits go to waste. Switch Claude Code between multiple paid accounts: each account gets its own profile, and maxx-headroom makes the setup, verification, and repo pinning painless.
 
-Two paid accounts means two tanks of quota. maxx-headroom manages Claude Code across multiple paid accounts, sets up each profile, verifies that it works, and lets you pin repos to the account you want billed. Switching accounts becomes a solved problem instead of a nightly ritual.
+Switching accounts becomes a solved problem instead of a daily ritual.
 
 Today it's two Claude Max accounts. Next week it might be one Max account and one Pro account; next month maybe you throw in Kimi or DeepSeek. Profiles live in config, so adding or removing one is just an edit.
 
