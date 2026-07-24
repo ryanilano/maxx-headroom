@@ -2,6 +2,12 @@
 
 Notable changes, newest first. Dates instead of version numbers, because the tool has no release process.
 
+## 2026-07-24
+
+- Added a banner image at [assets/tokenmaxxing.png](assets/tokenmaxxing.png) and placed it at the top of the README.
+- Rewrote the README: a new "What It Does" section up front, an expanded origin story, and a nav row linking the main sections.
+- Set the GitHub repo description and topics so the project is discoverable from search and the repo sidebar.
+
 ## 2026-07-23
 
 - Added [CLAUDE.md](CLAUDE.md) with a two-tier punctuation rule: no em-dashes in `bin/maxx` output, rare and varied em-dashes in prose docs.
