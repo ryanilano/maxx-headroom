@@ -2,6 +2,11 @@
 
 Notable changes, newest first. Dates instead of version numbers, because the tool has no release process.
 
+## 2026-07-23
+
+- Added [CLAUDE.md](CLAUDE.md) with a two-tier punctuation rule: no em-dashes in `bin/maxx` output, rare and varied em-dashes in prose docs.
+- Removed all 46 em-dashes from `bin/maxx`, in strings and comments. Replacements vary by message (colon, semicolon, parentheses, sentence split) so `maxx doctor` no longer reads as one repeated construction. No message changed meaning or wording.
+
 ## 2026-07-22
 
 - Evaluated [cc-switch](https://github.com/farion1231/cc-switch) and decided not to adopt it. Reasoning in [CONSIDERATIONS.md](notes/CONSIDERATIONS.md).
