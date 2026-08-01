@@ -122,6 +122,34 @@ expand_cfg() {
   esac
 }
 
+# Every config dir that could hold a CLAUDE.md: the default dir Claude Code uses
+# when CLAUDE_CONFIG_DIR is unset, plus one per profile. Deduped, order stable,
+# only dirs that actually carry a CLAUDE.md.
+rule_dirs() {
+  local d seen=""
+  for d in "$HOME/.claude" $(profile_rows | cut -f2); do
+    d="$(expand_cfg "$d")"
+    case ":$seen:" in *":$d:"*) continue ;; esac
+    seen="$seen:$d"
+    [ -f "$d/CLAUDE.md" ] && printf '%s\n' "$d"
+  done
+}
+
+# Slugs of the universal-rule blocks in one CLAUDE.md, in file order.
+rule_slugs() {
+  sed -n 's/^<!-- BEGIN universal-rule: \([A-Za-z0-9_-]*\) -->$/\1/p' "$1"
+}
+
+# Checksum of one block's text, or empty when the block is absent. Compared
+# rather than diffed: doctor reports that two homes disagree, never which one
+# is right. Picking a winner is a judgment call and maxx does not make it.
+rule_sig() {
+  local out
+  out="$(sed -n "/^<!-- BEGIN universal-rule: $2 -->\$/,/^<!-- END universal-rule: $2 -->\$/p" "$1")"
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | cksum | awk '{print $1}'
+}
+
 wrapper_body() {
   # $1 config_dir, $2 tool
   local cfg="$1" tool="$2" line
@@ -596,6 +624,55 @@ cmd_doctor() {
         err "$wdir/$wname missing (relink by hand, or drop it from watch_links in profiles.json)"
       fi
     done < <(profiles_json | jq -r '(.watch_links // {}) | to_entries[] | .key as $d | .value[] | [$d, .] | @tsv')
+  fi
+
+  # Shared behavioural rules. A CLAUDE.md block wrapped in
+  # <!-- BEGIN universal-rule: slug --> ... <!-- END universal-rule: slug -->
+  # is meant to read the same in every home. Nothing enforced that, so an edit
+  # landed in one home and the others kept the old text. Watched links catch a
+  # broken symlink; they cannot catch two files that both exist and disagree.
+  local -a rdirs=()
+  local rd
+  while IFS= read -r rd; do rdirs+=("$rd"); done < <(rule_dirs)
+  if [ "${#rdirs[@]}" -ge 2 ]; then
+    local -a allslugs=()
+    local s d sig ref refdir drifted=0 checked=0
+    local tilde="~"
+    for rd in "${rdirs[@]}"; do
+      while IFS= read -r s; do
+        case " ${allslugs[*]-} " in *" $s "*) continue ;; esac
+        allslugs+=("$s")
+      done < <(rule_slugs "$rd/CLAUDE.md")
+    done
+    if [ "${#allslugs[@]}" -eq 0 ]; then
+      printf '\n== config rules ==\n'
+      note "no universal-rule blocks found; nothing to compare"
+    else
+      printf '\n== config rules ==\n'
+      for s in "${allslugs[@]}"; do
+        ref=""; refdir=""
+        checked=$((checked+1))
+        for d in "${rdirs[@]}"; do
+          sig="$(rule_sig "$d/CLAUDE.md" "$s")"
+          if [ -z "$sig" ]; then
+            err "rule '$s' missing from ${d/#$HOME/$tilde}/CLAUDE.md (present in ${refdir:-another home})"
+            drifted=1
+            continue
+          fi
+          if [ -z "$ref" ]; then
+            ref="$sig"; refdir="${d/#$HOME/$tilde}"
+          elif [ "$sig" != "$ref" ]; then
+            err "rule '$s' differs: ${d/#$HOME/$tilde}/CLAUDE.md does not match $refdir/CLAUDE.md"
+            drifted=1
+          fi
+        done
+      done
+      if [ "$drifted" -eq 0 ]; then
+        ok "$checked universal-rule block(s) identical across ${#rdirs[@]} CLAUDE.md files"
+      else
+        note "copy the winning block into the other homes by hand; maxx will not pick a side"
+      fi
+    fi
   fi
 
   printf '\n%d problem(s), %d warning(s).\n' "$FAILS" "$WARNS"

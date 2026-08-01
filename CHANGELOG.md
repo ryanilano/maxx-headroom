@@ -2,6 +2,10 @@
 
 Notable changes, newest first. Dates instead of version numbers, because the tool has no release process.
 
+## 2026-08-01
+
+- `doctor` gained a `== config rules ==` section. It compares any block of `CLAUDE.md` wrapped in `<!-- BEGIN universal-rule: slug -->` / `<!-- END universal-rule: slug -->` across every profile's config dir plus the default `~/.claude`, and fails when a block is missing from one home or differs between two. Written after a rule was corrected in one config home on 2026-07-31 and the other two kept the broken version for a day; watched links catch a dead symlink, but nothing caught two live files that disagree. It reports which homes differ and never picks a winner.
+
 ## 2026-07-24
 
 - Added a banner image at [assets/tokenmaxxing.png](assets/tokenmaxxing.png) and placed it at the top of the README.

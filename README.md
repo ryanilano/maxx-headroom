@@ -58,7 +58,9 @@ maxx pin <repo> <profile> # pin a repo's VS Code terminals to one account
 
 `setup` creates the per-profile config dirs, writes a `claude-<name>` wrapper per profile into `~/bin`, symlinks pilotfish agents from the canonical profile into the others, merges presets into ccmanager's config, and lazily checks auth by launching a real trial session per profile. It never pokes at your Keychain. Everything merges into existing files; nothing gets clobbered, and running it twice changes nothing.
 
-`doctor` re-checks all of it: auth per profile, symlink integrity (Claude Code updates like to quietly replace the agents symlink with a fresh directory), model allowlists, ccmanager presets, wrappers on PATH. It tells you exactly what's missing.
+`doctor` re-checks all of it: auth per profile, symlink integrity (Claude Code updates like to quietly replace the agents symlink with a fresh directory), model allowlists, ccmanager presets, wrappers on PATH, and shared rule blocks in each profile's `CLAUDE.md`. It tells you exactly what's missing.
+
+Shared rule blocks are the drift a symlink check cannot see. Wrap a section of `CLAUDE.md` in `<!-- BEGIN universal-rule: some-slug -->` and `<!-- END universal-rule: some-slug -->`, and `doctor` compares that block across every profile's config dir plus the default one. Two files that both exist and quietly disagree are the failure mode here: an edit lands in one home, the others keep the old text, and nothing errors. `doctor` reports which homes differ and stops there. It never picks a winner, because which home is right is a judgment call.
 
 `pin` writes `CLAUDE_CONFIG_DIR` into a repo's `.vscode/settings.json` terminal environment, so every terminal you open in that repo bills the account you chose. Existing settings are preserved. You don't have to pin anything. Plain `claude` bills whatever account the default config dir is logged into, and typing a wrapper like `claude-main` picks an account for one session. Pin a repo when you keep catching yourself starting sessions there on the wrong account.
 
