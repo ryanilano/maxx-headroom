@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm root -g)",
+      "Bash(claude plugin validate *)",
+      "Bash(docker info)"
+    ]
+  }
+}
